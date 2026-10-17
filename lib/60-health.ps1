@@ -150,6 +150,104 @@ function Get-PluginCacheDrift {
     return $results.ToArray()
 }
 
+function Get-SkillDescriptionLength {
+    # Length of a SKILL.md frontmatter description (folded/quoted forms included), whitespace collapsed.
+    param([string]$Path)
+    $lines = @(Get-Content -Path $Path -Encoding UTF8 -ErrorAction SilentlyContinue)
+    if ($lines.Count -lt 3 -or $lines[0].Trim() -ne '---') { return 0 }
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $inDesc = $false
+    for ($i = 1; $i -lt $lines.Count; $i++) {
+        $l = $lines[$i]
+        if ($l.Trim() -eq '---') { break }
+        if ($l -match '^description:\s*(.*)$') { $inDesc = $true; $parts.Add($Matches[1]); continue }
+        if ($inDesc) {
+            if ($l -match '^[A-Za-z][\w-]*:') { break }
+            $parts.Add($l)
+        }
+    }
+    $text = (($parts -join ' ') -replace '\s+', ' ').Trim()
+    $text = ($text -replace '^[>|][-+]?\s*', '').Trim('"', "'", ' ')
+    return $text.Length
+}
+
+function Get-EnabledPluginSkillDirs {
+    # skills/ folders of the Claude Code plugins that are enabled in settings.json (old cache
+    # versions on disk are not loaded, so they are not counted).
+    param([string]$ClaudeDir = (Join-Path $HOME '.claude'))
+    $dirs = [System.Collections.Generic.List[string]]::new()
+    try {
+        $settingsPath  = Join-Path $ClaudeDir 'settings.json'
+        $installedPath = Join-Path $ClaudeDir (Join-Path 'plugins' 'installed_plugins.json')
+        if (-not (Test-Path $settingsPath) -or -not (Test-Path $installedPath)) { return @() }
+        $settings  = Get-Content $settingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $installed = Get-Content $installedPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $enabled = Get-RawProperty $settings 'enabledPlugins' $null
+        if ($null -eq $enabled) { return @() }
+        foreach ($p in $enabled.PSObject.Properties) {
+            if ($p.Value -ne $true) { continue }
+            $records = Get-RawProperty $installed.plugins $p.Name $null
+            if ($null -eq $records) { continue }
+            foreach ($rec in @($records)) {
+                $path = Get-OptionalProperty $rec 'installPath' ''
+                if ($path) { $dirs.Add((Join-Path $path 'skills')) }
+            }
+        }
+    } catch { return @() }
+    return $dirs.ToArray()
+}
+
+function Get-SkillLibraryStats {
+    # Every installed skill puts its description into every session. Past a budget the harness drops
+    # some without warning (harness-engineering: "Auditing a skill library"), so [H] shows the cost.
+    # Pure: give it the skill roots one harness loads. Never deletes anything.
+    param([string]$Harness, [string[]]$Dirs, [int]$LongDescChars = 250)
+    $skills = [System.Collections.Generic.List[object]]::new()
+    foreach ($d in @($Dirs)) {
+        if (-not $d -or -not (Test-Path $d -PathType Container)) { continue }
+        foreach ($sd in @(Get-ChildItem -Path $d -Directory -ErrorAction SilentlyContinue)) {
+            $file = Join-Path $sd.FullName 'SKILL.md'
+            if (-not (Test-Path $file -PathType Leaf)) { continue }
+            $skills.Add([pscustomobject]@{ name = $sd.Name; chars = (Get-SkillDescriptionLength $file); root = $d })
+        }
+    }
+    $chars = [int](($skills | Measure-Object chars -Sum).Sum)
+    $dups = @($skills | Group-Object name | Where-Object { $_.Count -gt 1 } | ForEach-Object Name)
+    $long = @($skills | Where-Object { $_.chars -gt $LongDescChars } | Sort-Object chars -Descending)
+    return [pscustomobject]@{
+        harness    = $Harness
+        count      = $skills.Count
+        descChars  = $chars
+        tokens     = [int][math]::Ceiling($chars / 4)   # rough: ~4 characters per token
+        duplicates = $dups
+        long       = $long
+    }
+}
+
+function Write-SkillLibraryHealth {
+    # Warn well below the ~5.4k-token listing budget the guide observed (about 2% of the window).
+    param([int]$WarnTokens = 4000)
+    $piDirs = @((Get-GlobalAgentsSkillsDir), (Join-Path (Join-Path (Join-Path $HOME '.pi') 'agent') 'skills'))
+    $rows = @(
+        (Get-SkillLibraryStats -Harness 'Claude Code' -Dirs (@(Get-GlobalClaudeSkillsDir) + @(Get-EnabledPluginSkillDirs))),
+        (Get-SkillLibraryStats -Harness 'pi/Codex' -Dirs $piDirs)
+    )
+    Write-Host ''
+    Write-Host '  Skill library (each description loads into every session)' -ForegroundColor Cyan
+    foreach ($r in $rows) {
+        $color = if ($r.tokens -gt $WarnTokens) { 'Yellow' } else { 'DarkGreen' }
+        $warn = if ($r.tokens -gt $WarnTokens) { ' - over budget: the harness may drop some silently; prune or shorten' } else { '' }
+        Write-Host ("   {0,-11} : {1} skills, ~{2} tokens of descriptions{3}" -f $r.harness, $r.count, $r.tokens, $warn) -ForegroundColor $color
+        if ($r.duplicates.Count -gt 0) {
+            Write-Host "     installed twice: $($r.duplicates -join ', ')" -ForegroundColor Yellow
+        }
+        if ($r.long.Count -gt 0) {
+            $top = @($r.long | Select-Object -First 5 | ForEach-Object { "$($_.name) $($_.chars)" })
+            Write-Host "     descriptions over 250 chars: $($top -join ', ')$(if ($r.long.Count -gt 5) { " (+$($r.long.Count - 5) more)" })" -ForegroundColor DarkYellow
+        }
+    }
+}
+
 function Test-ForgeInstalled {
     # Is the Forge plugin (jdforsythe/forge) installed in Claude Code? Kickoffs name its mission-planner
     # skill only when it is. $McClaudeDir overrides ~/.claude (the test suite points it at a fixture).
@@ -280,6 +378,7 @@ function Invoke-EnvironmentHealth {
         $hint = switch ($r.status) { 'missing' { ' - installs on next launch, or run [G]' } 'differs' { ' - run [G] to review/update' } default { '' } }
         Write-Host "   $($r.skill) ($($r.harness)): $($r.status)$hint" -ForegroundColor $color
     }
+    Write-SkillLibraryHealth
 
     if ($PiEnabled) {
         # Local checks only (no registry/git fetch) so [H] stays fast; [U] does the network probe.

@@ -1425,6 +1425,74 @@ try {
     $emptyReadHost = @(Get-ChildItem (Join-Path $RepoRoot 'lib') -Filter '*.ps1' | Select-String -Pattern $emptyReadHostRe)
     Check "menu prompt: the guard pattern catches Read-Host ''" ("return (Read-Host '')" -match $emptyReadHostRe)
     Check "menu prompt: no Read-Host '' in lib" ($emptyReadHost.Count -eq 0)
+
+    # =======================================================================
+    # Instructions + check command (context health) and the skill-library budget
+    # =======================================================================
+    $vRoot = Join-Path $TestRoot 'verify'
+    function New-VerifyFixture { param([string]$Name, [hashtable]$Files)
+        $d = Join-Path $vRoot $Name; New-Item -ItemType Directory -Path $d -Force | Out-Null
+        foreach ($k in $Files.Keys) { Set-Content -Path (Join-Path $d $k) -Value $Files[$k] -Encoding UTF8 }
+        return $d }
+
+    $d = New-VerifyFixture 'agents-only' @{ 'AGENTS.md' = "# x`n`n## Commands`n- test: ``npm test```n" }
+    $h = Get-ContextHealth $d
+    Check 'context: AGENTS.md only -> instructions, no CLAUDE.md' ($h.hasInstructions -and $h.hasAgentsMd -and -not $h.hasClaudeMd)
+    Check 'verify: command under a Commands heading' ($h.verify.status -eq 'found' -and $h.verify.command -eq 'npm test' -and $h.verify.file -eq 'AGENTS.md')
+    Check 'context: neither file -> no instructions' (-not (Get-ContextHealth (New-VerifyFixture 'empty' @{})).hasInstructions)
+
+    $d = New-VerifyFixture 'template' @{}
+    New-MinimalClaudeMd $d
+    Check 'verify: the minimal CLAUDE.md template is flagged as placeholder' ((Get-VerifyCommandStatus $d).status -eq 'placeholder')
+    Check 'verify: template stays short (~20 lines)' (@(Get-Content (Join-Path $d 'CLAUDE.md')).Count -le 20)
+
+    $d = New-VerifyFixture 'none' @{ 'CLAUDE.md' = "# x`n`nBe careful.`n" }
+    Check 'verify: no command -> missing' ((Get-VerifyCommandStatus $d).status -eq 'missing')
+    $d = New-VerifyFixture 'path-first' @{ 'AGENTS.md' = "- Verify (in ``~/code/x``): ``make check```n" }
+    Check 'verify: a bare path is skipped, the command after it wins' ((Get-VerifyCommandStatus $d).command -eq 'make check')
+    $d = New-VerifyFixture 'flag' @{ 'AGENTS.md' = "## Commands`n- ``--spin 90`` still exists`n" }
+    Check 'verify: a flag is not a command' ((Get-VerifyCommandStatus $d).status -eq 'missing')
+    $fence = '```'
+    $d = New-VerifyFixture 'fenced' @{ 'AGENTS.md' = "## Verify`n$fence`n# run this`npytest -q`n$fence`n" }
+    Check 'verify: fenced block under Verify, comment skipped' ((Get-VerifyCommandStatus $d).command -eq 'pytest -q')
+    $d = New-VerifyFixture 'rules' @{ 'AGENTS.md' = "## Rules`n- Run the tests before a PR: ``pwsh -File tests/run-tests.ps1```n" }
+    Check 'verify: test command elsewhere in the file (fallback)' ((Get-VerifyCommandStatus $d).command -eq 'pwsh -File tests/run-tests.ps1')
+    $d = New-VerifyFixture 'assign' @{ 'AGENTS.md' = "- Verify: ``T=`$(mktemp -d) && ./tool -n `$T`` - must print ``2024.03.12 a.txt```n" }
+    Check 'verify: a command starting with VAR= counts, the expected output after it does not' ((Get-VerifyCommandStatus $d).command -eq 'T=$(mktemp -d) && ./tool -n $T')
+    $d = New-VerifyFixture 'docs-only' @{ 'AGENTS.md' = "## Verify`n- Verify: none (documents only, no code)`n" }
+    $vn = Get-VerifyCommandStatus $d
+    Check 'verify: explicit none is a decision, with its reason' ($vn.status -eq 'none' -and $vn.command -eq 'documents only, no code')
+    $d = New-VerifyFixture 'none-more' @{ 'CLAUDE.md' = "- Verify: none (not built yet). Each step has a check.`n" }
+    Check 'verify: none reason is the text in brackets' ((Get-VerifyCommandStatus $d).command -eq 'not built yet')
+    $d = New-VerifyFixture 'none-then-cmd' @{ 'AGENTS.md' = "- Verify: none`n## Commands`n- ``make test```n" }
+    Check 'verify: a real command beats verify none' ((Get-VerifyCommandStatus $d).status -eq 'found')
+    $d = New-VerifyFixture 'pointer' @{ 'AGENTS.md' = '# x' }
+    New-AgentsPointerClaudeMd $d
+    Check 'context: pointer CLAUDE.md imports AGENTS.md' ((Get-Content (Join-Path $d 'CLAUDE.md') -Raw).Trim() -eq '@AGENTS.md')
+
+    $sA = Join-Path $TestRoot 'skills-a'; $sB = Join-Path $TestRoot 'skills-b'
+    foreach ($pair in @(@($sA, 'short', "---`nname: short`ndescription: Does one thing.`n---`nbody"),
+                        @($sA, 'long', "---`nname: long`ndescription: >-`n  $('word ' * 70)`n  more`nlicense: MIT`n---`nbody"),
+                        @($sB, 'short', "---`nname: short`ndescription: ""Same skill again.""`n---`n"))) {
+        New-Item -ItemType Directory -Path (Join-Path $pair[0] $pair[1]) -Force | Out-Null
+        Set-Content -Path (Join-Path (Join-Path $pair[0] $pair[1]) 'SKILL.md') -Value $pair[2] -Encoding UTF8
+    }
+    New-Item -ItemType Directory -Path (Join-Path $sA 'not-a-skill') -Force | Out-Null
+    Check 'skills: folded description length' ((Get-SkillDescriptionLength (Join-Path (Join-Path $sA 'long') 'SKILL.md')) -eq ('word ' * 70 + 'more').Length)
+    Check 'skills: quoted description length' ((Get-SkillDescriptionLength (Join-Path (Join-Path $sB 'short') 'SKILL.md')) -eq 'Same skill again.'.Length)
+    $st = Get-SkillLibraryStats -Harness 'test' -Dirs @($sA, $sB, (Join-Path $TestRoot 'no-such-skills'))
+    Check 'skills: counts SKILL.md folders only, across roots' ($st.count -eq 3)
+    Check 'skills: same name in two roots is a duplicate' (@($st.duplicates) -join ',' -eq 'short')
+    Check 'skills: long description listed' (@($st.long).Count -eq 1 -and $st.long[0].name -eq 'long')
+    Check 'skills: tokens ~ chars/4' ($st.tokens -eq [int][math]::Ceiling($st.descChars / 4))
+
+    $fc = Join-Path $TestRoot 'fake-claude-skills'
+    New-Item -ItemType Directory -Path (Join-Path $fc 'plugins') -Force | Out-Null
+    Set-Content (Join-Path $fc 'settings.json') '{"enabledPlugins":{"on@m":true,"off@m":false}}' -Encoding UTF8
+    Set-Content (Join-Path (Join-Path $fc 'plugins') 'installed_plugins.json') '{"plugins":{"on@m":[{"installPath":"/p/on"}],"off@m":[{"installPath":"/p/off"}]}}' -Encoding UTF8
+    $pd = @(Get-EnabledPluginSkillDirs -ClaudeDir $fc)
+    Check 'skills: only enabled plugins are counted' ($pd.Count -eq 1 -and $pd[0] -eq (Join-Path '/p/on' 'skills'))
+    Check 'skills: no claude dir -> no plugin dirs' (@(Get-EnabledPluginSkillDirs -ClaudeDir (Join-Path $TestRoot 'nope')).Count -eq 0)
 } catch {
     # An exception must fail the run. Without this catch, a crash ended the main block early and the
     # summary still said '0 failed' (exit 0) with half the checks never run.

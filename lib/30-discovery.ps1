@@ -501,7 +501,8 @@ function Sync-NewProjects {
 
         $health = Get-ContextHealth $p
         if (-not $health.hasClaudeMd) {
-            Write-Host '  Context     CLAUDE.md missing' -ForegroundColor Yellow
+            $why = if ($health.hasAgentsMd) { 'AGENTS.md only (Claude Code reads CLAUDE.md)' } else { 'no CLAUDE.md or AGENTS.md' }
+            Write-Host "  Context     $why" -ForegroundColor Yellow
             if (Read-YesNo '  Offer context setup now?' 'N') {
                 Invoke-ContextSetup $p
             }
@@ -806,7 +807,12 @@ function New-ScaffoldedProject {
     }
 
     if (-not (Test-Path (Join-Path $resolvedPath 'CLAUDE.md'))) {
-        if (Read-YesNo '  No CLAUDE.md found. Create one?' 'Y') {
+        if (Test-Path (Join-Path $resolvedPath 'AGENTS.md')) {
+            if (Read-YesNo '  AGENTS.md found. Point Claude Code at it (CLAUDE.md: @AGENTS.md)?' 'Y') {
+                New-AgentsPointerClaudeMd $resolvedPath
+                Write-Host '  CLAUDE.md created (@AGENTS.md).' -ForegroundColor Green
+            }
+        } elseif (Read-YesNo '  No CLAUDE.md found. Create one?' 'Y') {
             New-MinimalClaudeMd $resolvedPath
             Write-Host '  CLAUDE.md created.' -ForegroundColor Green
         }
@@ -865,7 +871,8 @@ function Import-ExistingProject {
 
     $health = Get-ContextHealth $resolvedPath
     if (-not $health.hasClaudeMd) {
-        Write-Host '  Context     CLAUDE.md missing' -ForegroundColor Yellow
+        $why = if ($health.hasAgentsMd) { 'AGENTS.md only (Claude Code reads CLAUDE.md)' } else { 'no CLAUDE.md or AGENTS.md' }
+        Write-Host "  Context     $why" -ForegroundColor Yellow
         if (Read-YesNo '  Offer context setup now?' 'N') {
             Invoke-ContextSetup $resolvedPath
         }

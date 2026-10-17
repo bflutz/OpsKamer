@@ -102,16 +102,111 @@ function Get-ContextIndexStatus {
     }
 }
 
+function Get-BacktickCommands {
+    # Backticked spans on a line that look like commands: a bare path or file name (`~/x`, `lib/a.ps1`,
+    # `AGENTS.md`) names a place, not a command, so it is skipped.
+    param([string]$Line)
+    foreach ($m in [regex]::Matches($Line, '`([^`]+)`')) {
+        $span = $m.Groups[1].Value.Trim()
+        if (-not $span) { continue }
+        if ($span -notmatch '\s' -and ($span -match '[/\\~]' -or $span -match '\.\w{1,4}$')) { continue }
+        if (Test-CommandLike $span) { $span }
+    }
+}
+
+function Test-CommandLike {
+    # The first word must look like a program (npm, ./run.sh, bin/x, $HOME/...): not a flag, a comment,
+    # a CSV header or prose punctuation.
+    param([string]$Text)
+    $first = ($Text.Trim() -split '\s+')[0]
+    # 'T=$(mktemp -d) && x' and 'FOO="a b" x' start with an assignment, which is still a command.
+    if ($first -match '^[A-Za-z_][A-Za-z0-9_]*=') { return $true }
+    return ($first -match '^[A-Za-z0-9_.~/$\\][A-Za-z0-9_.~/$\\:=+-]*$')
+}
+
+function Get-VerifyCommandStatus {
+    # The command that proves a change works, read from the project's instructions (AGENTS.md first, then
+    # CLAUDE.md). Without one an agent can only claim it's done. A line counts when it sits under a heading
+    # about commands, verifying or testing, or starts with 'verify:', 'test:' or 'check:', and holds a
+    # backticked command that isn't a placeholder.
+    # Returns status 'found' (with command + file), 'none' ('Verify: none (why)': nothing to check, the
+    # reason is in .command), 'placeholder' (slot left unfilled) or 'missing'.
+    param([string]$ProjectPath)
+
+    # 'bevele' / 'vul in' are Afrikaans for 'commands' / 'fill in' (some users' own templates).
+    $sectionRe = '(?i)command|verif|\btests?\b|testing|\bchecks?\b|\bbuild\b|bevele'
+    $keyLineRe = '(?i)^\s*(?:[-*]\s*)?(?:\*\*)?(?:verify|test|tests|check)(?:\*\*)?\s*:'
+    $placeholderRe = '(?i)\bTODO\b|<[^>`]+>|add build, test|vul in'
+    $testRunnerRe = '(?i)\btest\b|pytest|run-tests|\bcheck\b|\bvitest\b|\bjest\b|\blint\b'
+    $noneRe = '(?i)^\s*(?:[-*]\s*)?(?:\*\*)?verify(?:\*\*)?\s*:\s*(?:none|n/a)\b(.*)$'
+    $sawPlaceholder = $false
+    $noneReason = $null; $noneFile = $null
+
+    foreach ($name in @('AGENTS.md', 'CLAUDE.md')) {
+        $file = Join-Path $ProjectPath $name
+        if (-not (Test-Path $file -PathType Leaf)) { continue }
+        $inSection = $false; $inFence = $false
+        foreach ($line in @(Get-Content -Path $file -ErrorAction SilentlyContinue)) {
+            if ($line -match '^\s*```') {
+                $inFence = -not $inFence
+                continue
+            }
+            if (-not $inFence -and $line -match '^\s*#{1,6}\s+(.*)$') {
+                $inSection = ($Matches[1] -match $sectionRe)
+                continue
+            }
+            $candidate = $inSection -or ($line -match $keyLineRe)
+            if (-not $candidate -or [string]::IsNullOrWhiteSpace($line)) { continue }
+
+            # A placeholder anywhere on the line wins, so 'Verify: TODO, e.g. `npm test`' isn't a command.
+            if ($line -match $placeholderRe) { $sawPlaceholder = $true; continue }
+            # 'Verify: none (documents only)' is a decision, not a gap: there is no code to check.
+            if ($line -match $noneRe) {
+                $rest = $Matches[1].Trim()
+                $noneReason = if ($rest -match '^\(([^)]*)\)') { $Matches[1].Trim() } else { $rest.Trim(' ', '-', '.') }
+                $noneFile = $name; continue
+            }
+            $cmd = $null
+            if ($inFence) { if (Test-CommandLike $line) { $cmd = $line.Trim() } }
+            else { $cmd = Get-BacktickCommands $line | Select-Object -First 1 }
+            if ($cmd) {
+                return [pscustomobject]@{ status = 'found'; command = $cmd; file = $name }
+            }
+        }
+    }
+    # Fallback: a test-runner command anywhere in the file, e.g. 'Run the tests: `npm test`' under Rules.
+    foreach ($name in @('AGENTS.md', 'CLAUDE.md')) {
+        $file = Join-Path $ProjectPath $name
+        if (-not (Test-Path $file -PathType Leaf)) { continue }
+        foreach ($line in @(Get-Content -Path $file -ErrorAction SilentlyContinue)) {
+            if ($line -match $placeholderRe) { continue }
+            foreach ($c in @(Get-BacktickCommands $line)) {
+                if ($c -match $testRunnerRe) { return [pscustomobject]@{ status = 'found'; command = $c; file = $name } }
+            }
+        }
+    }
+    if ($null -ne $noneFile) { return [pscustomobject]@{ status = 'none'; command = $noneReason; file = $noneFile } }
+    $status = if ($sawPlaceholder) { 'placeholder' } else { 'missing' }
+    return [pscustomobject]@{ status = $status; command = $null; file = $null }
+}
+
 function Get-ContextHealth {
     param([string]$ProjectPath)
 
     $claudeMd = Join-Path $ProjectPath 'CLAUDE.md'
+    $agentsMd = Join-Path $ProjectPath 'AGENTS.md'
     $commandsDir = Join-Path (Join-Path $ProjectPath '.claude') 'commands'
     $jigProfiles = Join-Path (Join-Path $ProjectPath '.jig') 'profiles'
     $missionNotes = Join-Path (Join-Path $ProjectPath '.mission-centre') 'notes.md'
 
+    $hasClaudeMd = Test-Path $claudeMd -PathType Leaf
+    $hasAgentsMd = Test-Path $agentsMd -PathType Leaf
     return [PSCustomObject]@{
-        hasClaudeMd     = Test-Path $claudeMd -PathType Leaf
+        hasClaudeMd     = $hasClaudeMd
+        # pi reads AGENTS.md and falls back to CLAUDE.md; Claude Code reads only CLAUDE.md.
+        hasAgentsMd     = $hasAgentsMd
+        hasInstructions = ($hasClaudeMd -or $hasAgentsMd)
+        verify          = Get-VerifyCommandStatus $ProjectPath
         hasCommands     = Test-Path $commandsDir -PathType Container
         hasJigProfiles  = Test-Path $jigProfiles -PathType Container
         hasMissionNotes = Test-Path $missionNotes -PathType Leaf
@@ -125,7 +220,18 @@ function Write-ContextHealth {
     $health = Get-ContextHealth $ProjectPath
     Write-Host ''
     Write-Host '  Context health' -ForegroundColor Cyan
-    Write-Host "   CLAUDE.md          : $(if ($health.hasClaudeMd) { 'present' } else { 'missing' })"
+    Write-Host "   CLAUDE.md          : $(if ($health.hasClaudeMd) { 'present' } elseif ($health.hasAgentsMd) { 'missing - Claude Code will not read AGENTS.md' } else { 'missing' })"
+    Write-Host "   AGENTS.md          : $(if ($health.hasAgentsMd) { 'present' } elseif ($health.hasClaudeMd) { 'missing (pi falls back to CLAUDE.md)' } else { 'missing' })"
+    $v = $health.verify
+    if ($v.status -eq 'found') {
+        Write-Host "   check command      : $($v.command) ($($v.file))" -ForegroundColor DarkGreen
+    } elseif ($v.status -eq 'none') {
+        $why = if ($v.command) { " - $($v.command)" } else { '' }
+        Write-Host "   check command      : none needed$why ($($v.file))" -ForegroundColor DarkGray
+    } else {
+        $what = if ($v.status -eq 'placeholder') { 'placeholder' } else { 'missing' }
+        Write-Host "   check command      : $what - add the command that proves a change works, or agents can only claim they're done" -ForegroundColor Yellow
+    }
     Write-Host "   .claude/commands   : $(if ($health.hasCommands) { 'present' } else { 'missing' })"
     Write-Host "   .jig/profiles      : $(if ($health.hasJigProfiles) { 'present' } else { 'not project-local' })"
     Write-Host "   mission notes      : $(if ($health.hasMissionNotes) { 'present' } else { 'missing' })"
@@ -137,23 +243,32 @@ function Write-ContextHealth {
 function New-MinimalClaudeMd {
     param([string]$ProjectPath)
     $projectName = Split-Path $ProjectPath -Leaf
+    # The agent reads this on every turn, so it holds only lines that change what the agent does:
+    # the check command, hazards, direction and where to read more. The stack and folder list are left
+    # out because the agent reads them from the code. The Verify TODO stays flagged in [H] until filled in.
     $content = @"
 # $projectName
 
-## Mission Context
-- Keep project-specific architecture, commands, constraints, and active mission notes here.
-- Prefer reading this file before broad codebase exploration.
-- Use focused searches and inspect only files needed for the current mission.
+## Verify
+- Verify: TODO - the command that proves a change works, e.g. ``npm test``
 
-## Common Commands
-- Add build, test, lint, and run commands after confirming them in this project.
+## Rules
+- Run Verify before saying a change is done.
+- Preserve changes you didn't make; check ``git status`` before editing.
 
-## Working Agreement
-- Preserve unrelated user changes.
-- Prefer small, verifiable changes.
-- Update this file when durable project knowledge changes.
+## Direction and hazards
+- <what the project is moving towards; files or folders never to edit by hand>
+
+## Read when
+- <kind of task> -> <file to read first>
 "@
     Set-Content -Path (Join-Path $ProjectPath 'CLAUDE.md') -Value $content -Encoding UTF8
+}
+
+function New-AgentsPointerClaudeMd {
+    # Claude Code reads CLAUDE.md, not AGENTS.md; an @-import keeps one file for every agent.
+    param([string]$ProjectPath)
+    Set-Content -Path (Join-Path $ProjectPath 'CLAUDE.md') -Value '@AGENTS.md' -Encoding UTF8
 }
 
 function Invoke-ContextIndexRefresh {
@@ -188,8 +303,14 @@ function Invoke-ContextSetup {
     if (-not (Assert-DirExists $ProjectPath)) { return }
 
     $health = Write-ContextHealth $ProjectPath
-    if (-not $health.hasClaudeMd) {
-        Write-Host '  CLAUDE.md is the primary Claude Code project memory file.' -ForegroundColor DarkGray
+    if ($health.hasAgentsMd -and -not $health.hasClaudeMd) {
+        # One instructions file for every agent: Claude Code imports AGENTS.md instead of keeping a copy.
+        if (Read-YesNo '  Point Claude Code at AGENTS.md (one-line CLAUDE.md: @AGENTS.md)?' 'Y') {
+            New-AgentsPointerClaudeMd $ProjectPath
+            Write-Host '  Created CLAUDE.md -> @AGENTS.md.' -ForegroundColor Green
+        }
+    } elseif (-not $health.hasInstructions) {
+        Write-Host '  CLAUDE.md is the primary Claude Code project memory file (pi reads it too).' -ForegroundColor DarkGray
         Write-Host '  [I] Generate with claude /init (headless, may take a minute)'
         Write-Host '  [C] Create a minimal Mission Centre CLAUDE.md'
         Write-Host '  [S] Skip'

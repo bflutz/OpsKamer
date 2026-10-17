@@ -121,6 +121,9 @@ are written into the code as comments next to the fix; this page collects them.
   registry in a private repo, and never commit `projects.json`.
 - **Check everything that would be published:** files, file names, commit messages and commit emails. Use
   your forge's no-reply address for public commits.
+- **Know the identities GitHub adds.** The test merge of every pull request (and a merge on the website) is
+  committed by `noreply@github.com`. An identity check that only allowed personal noreply addresses failed
+  the first outside pull request. Allow GitHub's own identity; it names no one.
 - **Keep the denylist outside the repo.** A list of names you must never publish is itself private. The
   public check (`tools/privacy-check.ps1`) covers generic patterns; a local `.local/denylist.txt` covers the
   rest, and a pre-push hook runs both.

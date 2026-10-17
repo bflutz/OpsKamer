@@ -107,10 +107,13 @@ $hasCommits = $false
 git rev-parse --verify --quiet HEAD *> $null
 if ($LASTEXITCODE -eq 0) { $hasCommits = $true }
 if ($hasCommits) {
+    # Allowed: personal GitHub noreply addresses, and GitHub's own identity (noreply@github.com), which
+    # GitHub uses for the test merge of every pull request and for merges made on the website. It names
+    # no person, so it leaks nothing.
     foreach ($row in @(git log --all --format='%h%x09%ae%x09%ce')) {
         $p = $row -split "`t"
         foreach ($e in $p[1], $p[2]) {
-            if ($e -notmatch '@users\.noreply\.github\.com$') { Add-Finding "commit $($p[0])" 'identity' "author/committer email is not a GitHub noreply address: $e" }
+            if ($e -notmatch '@users\.noreply\.github\.com$' -and $e -ne 'noreply@github.com') { Add-Finding "commit $($p[0])" 'identity' "author/committer email is not a GitHub noreply address: $e" }
         }
     }
     foreach ($row in @(git log --all --format='%h%x09%B%x1e')) {

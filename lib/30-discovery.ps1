@@ -788,7 +788,9 @@ function New-ScaffoldedProject {
     foreach ($e in $ConfigRef.Value) { $updated.Add($e) }
     $updated.Add($project)
     $ConfigRef.Value = $updated.ToArray()
-    Save-Config $ConfigRef.Value
+    # This function returns $project: any stray output (e.g. git from the shared-state sync)
+    # would turn the return value into an array, so keep everything off the pipeline.
+    $null = Save-Config $ConfigRef.Value
 
     Write-Host ''
     Write-Host "  Project '$name' added." -ForegroundColor Green
@@ -807,7 +809,7 @@ function New-ScaffoldedProject {
 
     if (-not (Test-Path (Join-Path $resolvedPath 'CLAUDE.md'))) {
         if (Read-YesNo '  No CLAUDE.md found. Create one?' 'Y') {
-            New-MinimalClaudeMd $resolvedPath
+            $null = New-MinimalClaudeMd $resolvedPath
             Write-Host '  CLAUDE.md created.' -ForegroundColor Green
         }
     }

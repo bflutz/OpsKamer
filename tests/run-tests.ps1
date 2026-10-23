@@ -1017,8 +1017,13 @@ try {
             Check 'fork gate: throttled + healthy is silent' ([string]::IsNullOrWhiteSpace($quietNow))
             # a build older than HEAD (manual merge/pull) is stale; a fresh one is not
             Check 'fork gate: fresh build is not stale' (-not (Test-PiForkBuildStale $fork))
+            $PiCommand = 'pii'; $PiForkFallbackCommand = 'git'
+            Check 'fork gate: fresh build -> pii used' ((Get-EffectivePiCommand 6>$null) -eq 'pii')
             (Get-Item (Join-Path $distDir 'cli.js')).LastWriteTimeUtc = [datetime]::UtcNow.AddDays(-30)
             Check 'fork gate: build older than HEAD is stale' (Test-PiForkBuildStale $fork)
+            # a build that failed partway leaves an old cli.js over newer packages: never launch it
+            Check 'fork gate: stale build -> falls back' ((Get-EffectivePiCommand 6>$null) -eq 'git')
+            $PiCommand = 'pi'; $PiForkFallbackCommand = 'pi'
             function Read-YesNo { $false }
             [void](Invoke-PiForkUpdateCheck -Mode 'check' -Force 6>$null)
             Check 'fork gate: stale build flagged as pending' ((Get-ToolUpdateState)['git:pi-fork'].note -match 'build older')

@@ -626,8 +626,11 @@ function Update-PiFork {
         Write-Host '   pii: npm install failed - previous build left in place.' -ForegroundColor Yellow; return $false
     }
 
-    # Same order as bootstrap-worktree.sh: hydrate model data only when stale.
-    $md = Invoke-ProcessCapture -FilePath $npm -ArgumentList @('run', '--silent', 'check:model-data') -WorkingDirectory $RepoPath -TimeoutSeconds 300
+    # Same order as bootstrap-worktree.sh: hydrate model data when stale. After a merge,
+    # always: the data is gitignored and check:model-data validates its shape, not that it
+    # matches the merged code (old data can pass the check and then fail the ai build).
+    $md = if ($st.behind -gt 0) { [PSCustomObject]@{ ok = $false } }
+          else { Invoke-ProcessCapture -FilePath $npm -ArgumentList @('run', '--silent', 'check:model-data') -WorkingDirectory $RepoPath -TimeoutSeconds 300 }
     if (-not $md.ok) {
         Write-Host '   pii: refreshing model data ...' -ForegroundColor DarkGray
         [void](Invoke-ProcessCapture -FilePath $npm -ArgumentList @('run', 'hydrate:model-data') -WorkingDirectory $RepoPath -TimeoutSeconds 900)
@@ -729,14 +732,18 @@ function Invoke-PiForkUpdateCheck {
 
 function Get-EffectivePiCommand {
     # Prefer the configured launcher (normally `pii`, the fork). If that is the
-    # fork but its build output is missing (e.g. a failed rebuild), fall back to
-    # vanilla `pi` rather than launching a terminal that dies immediately.
+    # fork but its build output is missing or older than the checked-out source,
+    # fall back to vanilla `pi` rather than launching a terminal that dies
+    # immediately. Stale matters: a build that fails partway leaves cli.js in place
+    # while the packages it imports were already rebuilt from newer source.
     $cmd = $PiCommand
-    if ($PiForkEnabled -and $cmd -eq 'pii' -and -not (Test-PiForkBuild)) {
-        if (Get-Command $PiForkFallbackCommand -ErrorAction SilentlyContinue) {
-            Write-Host "  WARN: pii fork build missing at $PiForkRepoPath - using '$PiForkFallbackCommand' for this launch." -ForegroundColor Yellow
-            return $PiForkFallbackCommand
-        }
+    if (-not ($PiForkEnabled -and $cmd -eq 'pii')) { return $cmd }
+    $why = if (-not (Test-PiForkBuild)) { 'build missing' }
+           elseif (Test-PiForkBuildStale) { 'build older than the checked-out source' }
+           else { '' }
+    if ($why -and (Get-Command $PiForkFallbackCommand -ErrorAction SilentlyContinue)) {
+        Write-Host "  WARN: pii fork $why at $PiForkRepoPath - using '$PiForkFallbackCommand' for this launch ([U] rebuilds)." -ForegroundColor Yellow
+        return $PiForkFallbackCommand
     }
     return $cmd
 }

@@ -553,6 +553,57 @@ function Get-PiForkStatus {
     return $st
 }
 
+function Get-PiForkEffectiveMode {
+    # Pure: the stricter of the global toolUpdates.mode and toolUpdates.piFork.mode.
+    # The fork merges, installs and builds a third party's code, so 'auto' for npm
+    # packages must not make it auto too; it is auto only when both say so.
+    param([string]$GlobalMode, [string]$ForkMode)
+    $rank = @{ off = 0; check = 1; auto = 2 }
+    $g = ([string]$GlobalMode).ToLowerInvariant(); if (-not $rank.ContainsKey($g)) { $g = 'check' }
+    $f = ([string]$ForkMode).ToLowerInvariant();   if (-not $rank.ContainsKey($f)) { $f = 'check' }
+    if ($rank[$g] -le $rank[$f]) { return $g }
+    return $f
+}
+
+function Get-PiForkSensitivePaths {
+    # Pure: the changed paths that run code at npm install or build time, or change
+    # where dependencies come from. Shown before a fork merge so they get a look.
+    param([string[]]$Paths)
+    return @($Paths | Where-Object {
+        $_ -match '(^|/)package(-lock)?\.json$' -or $_ -match '(^|/)\.npmrc$' -or
+        $_ -match '(^|/)scripts/' -or $_ -match '(^|/)\.husky/' -or $_ -match '^\.github/workflows/'
+    })
+}
+
+function Show-PiForkIncoming {
+    # What a merge of <remote>/<branch> would bring in: newest commits first, then any
+    # changed files that run at install/build time. Reads the last fetch; no network.
+    param(
+        [string]$RepoPath = $PiForkRepoPath,
+        [string]$Remote = $PiForkRemote,
+        [string]$Branch = $PiForkBranch,
+        [int]$Max = 10
+    )
+    $git = Get-GitExecutable
+    if (-not $git) { return }
+    $ref = "$Remote/$Branch"
+    $log = Invoke-ProcessCapture -FilePath $git -ArgumentList @('log', '--no-merges', '--format=%h %an: %s', "HEAD..$ref") -WorkingDirectory $RepoPath
+    if ($log.ok) {
+        $lines = @(($log.out -split '\r?\n') | Where-Object { $_ })
+        foreach ($l in @($lines | Select-Object -First $Max)) { Write-Host "    $l" -ForegroundColor DarkGray }
+        if ($lines.Count -gt $Max) { Write-Host "    ... and $($lines.Count - $Max) more (git log HEAD..$ref in $RepoPath)" -ForegroundColor DarkGray }
+    }
+    $diff = Invoke-ProcessCapture -FilePath $git -ArgumentList @('diff', '--name-only', "HEAD...$ref") -WorkingDirectory $RepoPath
+    if ($diff.ok) {
+        $sensitive = @(Get-PiForkSensitivePaths @(($diff.out -split '\r?\n') | Where-Object { $_ }))
+        if ($sensitive.Count -gt 0) {
+            Write-Host "  These run at install/build time or change dependencies ($($sensitive.Count)):" -ForegroundColor Yellow
+            foreach ($p in @($sensitive | Select-Object -First $Max)) { Write-Host "    $p" -ForegroundColor Yellow }
+            if ($sensitive.Count -gt $Max) { Write-Host "    ... and $($sensitive.Count - $Max) more" -ForegroundColor Yellow }
+        }
+    }
+}
+
 function Update-PiFork {
     # Merge <remote>/<branch> and rebuild. Non-destructive: aborts a conflicting
     # merge, never resets, never cleans (untracked local files are safe).
@@ -706,6 +757,7 @@ function Invoke-PiForkUpdateCheck {
     Write-Host ''
     if ($st.behind -gt 0) {
         Write-Host "  pii (leo-labs-ai fork): $($st.behind) new upstream commit(s) on $PiForkRemote/$PiForkBranch" -ForegroundColor Yellow
+        if ($Mode -ne 'auto') { Show-PiForkIncoming }
     } elseif ($staleBuild) {
         Write-Host '  pii (leo-labs-ai fork): build is older than the checked-out source' -ForegroundColor Yellow
     } else {
@@ -840,7 +892,8 @@ function Invoke-PiLaunchUpdateGate {
                                -Label 'pi toolchain'
     }
     # The leo-labs-ai fork (pii) updates from git, not npm.
-    Invoke-PiForkUpdateCheck -Mode $ToolUpdatesMode -IntervalHours $ToolUpdateIntervalHours
+    # The fork asks first unless piFork.mode says auto: a merge runs a third party's install and build scripts.
+    Invoke-PiForkUpdateCheck -Mode (Get-PiForkEffectiveMode $ToolUpdatesMode $PiForkMode) -IntervalHours $ToolUpdateIntervalHours
     # pi's own packages and tokenjuice, from their sources (66-sources.ps1).
     Invoke-PiSourceUpdates -Mode $ToolUpdatesMode -IntervalHours $ToolUpdateIntervalHours
 }

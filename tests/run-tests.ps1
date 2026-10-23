@@ -95,6 +95,7 @@ try {
     $ToolUpdateIncludeClaudeCode = $false; $ToolUpdatePiOnLaunch = $false
     $ToolUpdatePackages = @(); $ToolUpdatePiPackages = @()
     $PiForkEnabled = $false; $PiForkRepoPath = ''; $PiForkRemote = 'origin'; $PiForkBranch = 'main'
+    $PiForkMode = 'check'
     $PiForkBuildScript = 'build:offline'; $PiForkFallbackCommand = 'pi'
     # Shared registry + self-update (lib/35-sharedstate.ps1): off unless a test turns it on.
     $SelfUpdateEnabled = $false; $DeviceName = 'TESTDEV'
@@ -957,6 +958,10 @@ try {
             [void](& $g $seed @('push', 'origin', 'HEAD:main'))
             $pre = Get-PiForkStatus -RepoPath $fork -Remote 'origin' -Branch 'main' -Fetch
             Check 'fork e2e: two upstream commits pending' ($pre.behind -eq 2)
+            # before asking, the incoming commits and install/build-time files are listed
+            $inc = (Show-PiForkIncoming -RepoPath $fork -Remote 'origin' -Branch 'main' -Max 1 6>&1 | Out-String)
+            Check 'fork e2e: incoming lists the newest commit' ($inc -match 'add package\.json' -and $inc -match 'and 1 more')
+            Check 'fork e2e: incoming flags package.json' ($inc -match 'install/build time' -and $inc -match '(?m)^\s+package\.json\s*$')
 
             $PiForkBuildScript = 'build:offline'
             $okRun = Update-PiFork -RepoPath $fork -Remote 'origin' -Branch 'main' 6>$null
@@ -1430,7 +1435,30 @@ try {
     $emptyReadHost = @(Get-ChildItem (Join-Path $RepoRoot 'lib') -Filter '*.ps1' | Select-String -Pattern $emptyReadHostRe)
     Check "menu prompt: the guard pattern catches Read-Host ''" ("return (Read-Host '')" -match $emptyReadHostRe)
     Check "menu prompt: no Read-Host '' in lib" ($emptyReadHost.Count -eq 0)
+    # =======================================================================
+    # Node.js security floor (lib/60-health.ps1) - pure, no node needed
+    # =======================================================================
+    Check 'node: below the line floor is vulnerable' ((Get-NodeSecurityStatus 'v24.18.0').status -eq 'vulnerable')
+    Check 'node: vulnerable names the minimum' ((Get-NodeSecurityStatus 'v24.18.0').detail -match '24\.22\.1')
+    Check 'node: exactly the floor is ok' ((Get-NodeSecurityStatus 'v24.22.1').status -eq 'ok')
+    Check 'node: above the floor is ok (numeric, not string, compare)' ((Get-NodeSecurityStatus 'v24.100.0').status -eq 'ok')
+    Check 'node: each listed line has its own floor' ((Get-NodeSecurityStatus 'v22.23.3').status -eq 'vulnerable' -and (Get-NodeSecurityStatus 'v26.12.1').status -eq 'ok')
+    Check 'node: a line older than every listed one is end of life' ((Get-NodeSecurityStatus 'v20.19.0').status -eq 'eol')
+    Check 'node: an odd line between listed ones is end of life' ((Get-NodeSecurityStatus 'v23.11.0').status -eq 'eol')
+    Check 'node: a line newer than every listed one is ok' ((Get-NodeSecurityStatus 'v28.0.0').status -eq 'ok')
+    Check 'node: unreadable version is unknown' ((Get-NodeSecurityStatus 'not a version').status -eq 'unknown')
+    # fork update mode: the stricter of global and fork (lib/65-updates.ps1) - pure
+    Check 'fork mode: global auto + fork check -> check' ((Get-PiForkEffectiveMode 'auto' 'check') -eq 'check')
+    Check 'fork mode: both auto -> auto' ((Get-PiForkEffectiveMode 'auto' 'auto') -eq 'auto')
+    Check 'fork mode: global off wins' ((Get-PiForkEffectiveMode 'off' 'auto') -eq 'off')
+    Check 'fork mode: fork off wins' ((Get-PiForkEffectiveMode 'auto' 'off') -eq 'off')
+    Check 'fork mode: unknown or empty fork mode means check' ((Get-PiForkEffectiveMode 'auto' '') -eq 'check' -and (Get-PiForkEffectiveMode 'auto' 'yolo') -eq 'check')
+    $sens = @(Get-PiForkSensitivePaths @('package.json', 'packages/ai/package.json', 'package-lock.json', 'scripts/build.mjs', 'packages/ai/scripts/gen.ts', '.npmrc', '.husky/pre-commit', '.github/workflows/ci.yml', 'packages/ai/src/index.ts', 'README.md', 'docs/scripts.md'))
+    Check 'fork sensitive: install/build files flagged' ($sens.Count -eq 8)
+    Check 'fork sensitive: source and docs not flagged' ($sens -notcontains 'packages/ai/src/index.ts' -and $sens -notcontains 'README.md' -and $sens -notcontains 'docs/scripts.md')
+    Check 'node: custom floor table' ((Get-NodeSecurityStatus 'v24.22.1' ([ordered]@{ '24' = '24.30.0' })).status -eq 'vulnerable')
 } catch {
+
     # An exception must fail the run. Without this catch, a crash ended the main block early and the
     # summary still said '0 failed' (exit 0) with half the checks never run.
     $script:Fail++

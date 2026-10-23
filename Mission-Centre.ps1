@@ -166,6 +166,9 @@ $PiForkRemote          = [string](Get-OptionalProperty $PiForkConfig 'remote' 'o
 $PiForkBranch          = [string](Get-OptionalProperty $PiForkConfig 'branch' 'main')
 $PiForkBuildScript     = [string](Get-OptionalProperty $PiForkConfig 'buildScript' 'build:offline')
 $PiForkFallbackCommand = [string](Get-OptionalProperty $PiForkConfig 'fallbackCommand' 'pi')
+# off | check | auto, default check: merging the fork runs a third party's install and build
+# scripts, so it asks first even when toolUpdates.mode is auto (Get-PiForkEffectiveMode).
+$PiForkMode            = ([string](Get-OptionalProperty $PiForkConfig 'mode' 'check')).ToLowerInvariant()
 
 # Mission Centre on every device (lib/35-sharedstate.ps1): self-update on launch, and an
 # optional shared project registry in a git repo (one file per project, paths per device).

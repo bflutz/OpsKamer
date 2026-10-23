@@ -250,6 +250,65 @@ function Invoke-StartupDriftCheck {
     }
 }
 
+# Lowest patched Node.js release per supported line. pi, pii and the Claude Bridge all
+# run on the system node and fetch() remote responses, which decode Brotli on their own.
+# Raise these when Node ships a security release; a line not listed here is end of life.
+$NodeSecurityFloor = [ordered]@{
+    '22' = '22.23.4'   # CVE-2026-111497 Brotli decoder RCE, 2026-10-21 release
+    '24' = '24.22.1'
+    '26' = '26.12.1'
+}
+$NodeSecurityAdvisory = 'CVE-2026-111497, Brotli decoder RCE'
+
+function Get-NodeSecurityStatus {
+    # Pure: classify a `node --version` string against $NodeSecurityFloor.
+    # status: ok | vulnerable | eol | unknown. A major newer than every listed line is
+    # treated as ok (released after the advisory), so the table only needs raising.
+    param([string]$Version, $Floor = $NodeSecurityFloor)
+    $st = [PSCustomObject]@{ version = [string]$Version; status = 'unknown'; minimum = ''; detail = '' }
+    if ($Version -notmatch '^\s*v?(\d+)\.(\d+)\.(\d+)') { $st.detail = 'cannot read the version'; return $st }
+    $v = [version]"$($Matches[1]).$($Matches[2]).$($Matches[3])"
+    $major = [string]$Matches[1]
+    $majors = @($Floor.Keys | ForEach-Object { [int]$_ })
+    if ($Floor.Contains($major)) {
+        $st.minimum = [string]$Floor[$major]
+        if ($v -ge [version]$st.minimum) { $st.status = 'ok' }
+        else { $st.status = 'vulnerable'; $st.detail = "below $($st.minimum) ($NodeSecurityAdvisory)" }
+    } elseif ([int]$major -gt ($majors | Measure-Object -Maximum).Maximum) {
+        $st.status = 'ok'
+    } else {
+        $st.status = 'eol'
+        $st.detail = "Node $major is out of support and gets no security fixes"
+    }
+    return $st
+}
+
+function Get-NodeUpdateHint {
+    # No fixed winget id: installs show up as OpenJS.NodeJS, .LTS or .22 depending on how they came in.
+    if ($MissionIsWindows) { return 'the installer from nodejs.org, or winget upgrade on the id `winget list node` shows' }
+    if ($MissionIsMacOS)   { return 'brew upgrade node (or the installer from nodejs.org)' }
+    return 'your package manager or nodejs.org'
+}
+
+function Get-InstalledNodeSecurityStatus {
+    # $null when node is not on PATH: nothing to warn about.
+    $node = Get-Command 'node' -ErrorAction SilentlyContinue
+    if (-not $node) { return $null }
+    $out = try { [string](& $node.Source --version 2>$null | Select-Object -First 1) } catch { '' }
+    return (Get-NodeSecurityStatus $out)
+}
+
+function Invoke-StartupNodeCheck {
+    # One subprocess (node --version); silent unless node needs a security update.
+    $st = Get-InstalledNodeSecurityStatus
+    if (-not $st -or $st.status -notin @('vulnerable', 'eol')) { return }
+    Write-Host ''
+    Write-Host "  Node.js $($st.version) needs a security update: $($st.detail)." -ForegroundColor Yellow
+    Write-Host '  pi, pii and the Claude Bridge run on it and decode responses from remote servers.' -ForegroundColor Yellow
+    Write-Host "  Update: $(Get-NodeUpdateHint); then restart the Claude Bridge." -ForegroundColor DarkGray
+    Read-Host '  Press Enter to continue'
+}
+
 function Get-JqInstallHint {
     if ($MissionIsWindows) { return 'winget install jqlang.jq' }
     if ($MissionIsMacOS)   { return 'brew install jq' }
@@ -268,6 +327,16 @@ function Invoke-EnvironmentHealth {
     $jq = Get-Command 'jq' -ErrorAction SilentlyContinue
     if ($jq) { Write-Host "   jq : $($jq.Source)" -ForegroundColor DarkGreen }
     else     { Write-Host "   jq : missing (optional; the jq skill expects it) - install: $(Get-JqInstallHint)" -ForegroundColor Yellow }
+    $nodeSt = Get-InstalledNodeSecurityStatus
+    if (-not $nodeSt) {
+        Write-Host '   node : missing' -ForegroundColor Yellow
+    } elseif ($nodeSt.status -in @('vulnerable', 'eol')) {
+        Write-Host "   node : $($nodeSt.version) - SECURITY UPDATE NEEDED: $($nodeSt.detail) - $(Get-NodeUpdateHint)" -ForegroundColor Red
+    } elseif ($nodeSt.status -eq 'unknown') {
+        Write-Host "   node : $($nodeSt.detail)" -ForegroundColor Yellow
+    } else {
+        Write-Host "   node : $($nodeSt.version)" -ForegroundColor DarkGreen
+    }
 
     Write-Host ''
     Write-Host '  Bundled skills (Claude Code: ~/.claude/skills, pi/Codex: ~/.agents/skills)' -ForegroundColor Cyan

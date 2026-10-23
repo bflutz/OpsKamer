@@ -33,6 +33,7 @@
         ],
         "piFork": {
             "enabled": false,
+            "mode": "check",
             "repoPath": "",
             "remote": "origin",
             "branch": "main",

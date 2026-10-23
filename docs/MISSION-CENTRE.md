@@ -420,6 +420,10 @@ is required` for models that otherwise work. Mission Centre keeps the toolchain 
 - **When opening a pi project:** checks `toolUpdates.piPackages`, Claude Code, the pi fork (if
   `piFork` is enabled), pi's own packages and tokenjuice before launching.
 - **`[U]`:** checks everything now, ignoring the throttle, and lists where each part updates from.
+- **Node.js:** at startup and in `[H]` Health, warns when `node --version` is below the lowest patched
+  release for its line, or on a line that no longer gets security fixes. pi, `pii` and the Claude Bridge
+  run on it and decode responses from remote servers (CVE-2026-111497, a Brotli decoder RCE, was fixed in
+  22.23.4, 24.22.1 and 26.12.1). Node itself is not updated for you.
 
 ### Every part updates from its own source
 
@@ -467,7 +471,7 @@ To follow another upstream skill, add a folder under `skills/` with its `SKILL.m
   "checkPiOnLaunch": true,
   "packages": ["@earendil-works/pi-coding-agent"],
   "piPackages": ["@earendil-works/pi-coding-agent"],
-  "piFork": { "enabled": false, "repoPath": "", "remote": "origin", "branch": "main",
+  "piFork": { "enabled": false, "mode": "check", "repoPath": "", "remote": "origin", "branch": "main",
               "buildScript": "build:offline", "fallbackCommand": "pi" }
 }
 ```
@@ -524,16 +528,22 @@ Install it with `pi/scripts/bootstrap.sh` (macOS) or `pi\scripts\bootstrap.ps1` 
 **Running pi from source (`pii`).** To run a pi fork from a local clone (by default the public
 [leo-labs-ai/pi-mono](https://github.com/leo-labs-ai/pi-mono)), run `setup.ps1 -WithFork`. It clones the
 fork, writes a `pii` launcher next to npm's global commands, and enables `toolUpdates.piFork`. Mission
-Centre then updates the fork from git: fetch, merge, `npm install --ignore-scripts`, model data if stale,
-`npm run build:offline`. Safeguards:
+Centre then updates the fork from git: fetch, merge, `npm install --ignore-scripts`, model data (always
+after a merge: it is gitignored, and its check validates shape, not freshness), `npm run build:offline`.
+Safeguards:
+
+- It asks first. `piFork.mode` (default `check`) caps `toolUpdates.mode`, the stricter wins, so `auto`
+  for npm packages does not merge and build a third party's code unattended; set both to `auto` for that.
+  Before asking it lists the incoming commits and flags changed files that run at install or build time
+  (`package*.json`, `.npmrc`, `scripts/`, `.husky/`, workflows).
 
 - It refuses to merge if the clone has uncommitted tracked changes, aborts a conflicting merge (naming the
   files), and never resets or cleans.
 - It refuses if `merge.ours.driver` is registered in the clone. A fork's `merge=ours` attributes suit its
   maintainers, but in a downstream clone they keep stale generated model tables. Don't run a fork's
   merge-driver setup script in your clone.
-- If the build is missing (e.g. a failed rebuild), launches fall back to `piFork.fallbackCommand`
-  (vanilla `pi`).
+- If the build is missing, or older than the checked-out commit (a build that fails partway leaves an old
+  `cli.js` importing newly rebuilt packages), launches fall back to `piFork.fallbackCommand` (vanilla `pi`).
 
 ## Optional: pi as the Default Engine
 

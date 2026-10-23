@@ -11,6 +11,7 @@ function Start-MissionCentre {
     $config = @(Invoke-McStartupStep 'loading projects (shared registry)' { ,@(Import-ProjectConfig) })
     if ($AutoDormantEnabled) { [void](Invoke-AutoDormant ([ref]$config) $DormantIdleDays) }
     [void](Invoke-McStartupStep 'profiles and plugins' { Invoke-StartupDriftCheck })
+    [void](Invoke-McStartupStep 'node security'        { Invoke-StartupNodeCheck })
     [void](Invoke-McStartupStep 'tool updates'         { Invoke-StartupToolUpdateCheck })
     Complete-McIntro
     $running = $true
